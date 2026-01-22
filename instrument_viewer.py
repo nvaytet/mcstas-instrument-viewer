@@ -6,6 +6,7 @@ import re
 import numpy as np
 import pythreejs as p3
 import ipywidgets as ipw
+import math
 
 
 SKIP_TYPES = [
@@ -40,7 +41,7 @@ class McStasComponent:
         )  # [rx, ry, rz] in degrees
         self.params = params if params is not None else {}
         self.absolute_pos = None
-        self.absolute_rotation = None
+        self.otation = None
 
     def __repr__(self):
         return f"McStasComponent({self.name}, {self.component_type}, pos={self.at_pos}, rel={self.relative_to})"
@@ -127,6 +128,32 @@ class McStasInstrumentParser:
 
         print(f"DEBUG:  Instrument parameters: {self.parameters}")
 
+        # Extract and parse DECLARE section variables
+        declare_match = re.search(r"DECLARE\s*%\{(.*?)%\}", content, re.DOTALL)
+        if declare_match:
+            declare_str = declare_match.group(1)
+            print(f"DEBUG DECLARE STRING:\n{declare_str[:500]}\n{'=' * 80}")
+            # Parse double variable = value pairs
+            declare_matches = re.finditer(r"double\s+(\w+)\s*=\s*([^;]+);", declare_str)
+            for match in declare_matches:
+                var_name = match.group(1).strip()
+                var_value = match.group(2).strip()
+                # Remove comments (// style)
+                var_value = re.sub(r"//.*$", "", var_value).strip()
+                try:
+                    self.parameters[var_name] = float(var_value)
+                    print(
+                        f"DEBUG DECLARE VAR: {var_name} = {var_value} -> {self.parameters[var_name]}"
+                    )
+                except ValueError:
+                    # Might be an expression or string, skip for now
+                    print(
+                        f"DEBUG DECLARE VAR: {var_name} = {var_value} (could not parse as float)"
+                    )
+                    pass
+
+        print(f"DEBUG: All parameters after DECLARE:  {self.parameters}")
+
         # print(f"DEBUG: Instrument parameters: {self.parameters}")
 
         # Extract TRACE section
@@ -212,6 +239,15 @@ class McStasInstrumentParser:
             #             print(f"WARNING: Could not evaluate '{coord}', using 0.0")
             #             at_pos.append(0.0)
 
+            eval_context = {
+                **self.parameters,
+                "PI": math.pi,
+                "sin": math.sin,
+                "cos": math.cos,
+                "tan": math.tan,
+                "atan": math.atan,
+            }
+
             # Parse position - evaluate expressions using instrument parameters
             at_pos = []
             for coord in at_str.split(","):
@@ -222,17 +258,17 @@ class McStasInstrumentParser:
                 except ValueError:
                     # Try to evaluate as expression with instrument parameters
                     try:
-                        # Create evaluation context with parameters and math functions
-                        import math
+                        # # Create evaluation context with parameters and math functions
+                        # import math
 
-                        eval_context = {
-                            **self.parameters,
-                            "PI": math.pi,
-                            "sin": math.sin,
-                            "cos": math.cos,
-                            "tan": math.tan,
-                            "atan": math.atan,
-                        }
+                        # eval_context = {
+                        #     **self.parameters,
+                        #     "PI": math.pi,
+                        #     "sin": math.sin,
+                        #     "cos": math.cos,
+                        #     "tan": math.tan,
+                        #     "atan": math.atan,
+                        # }
                         value = eval(coord, {"__builtins__": {}}, eval_context)
                         at_pos.append(float(value))
                         print(f"DEBUG EVAL: {name} - evaluated '{coord}' = {value}")
@@ -247,13 +283,47 @@ class McStasInstrumentParser:
             # Parse parameters
             params = self._parse_parameters(params_str)
 
+            # # Parse rotation if present
+            # rotation = [0, 0, 0]
+            # rotation_match = re.search(r"ROTATED\s*\((.*?)\)\s*RELATIVE", block)
+            # if rotation_match:
+            #     rotation = [
+            #         float(x.strip()) for x in rotation_match.group(1).split(",")
+            #     ]
             # Parse rotation if present
             rotation = [0, 0, 0]
             rotation_match = re.search(r"ROTATED\s*\((.*?)\)\s*RELATIVE", block)
             if rotation_match:
-                rotation = [
-                    float(x.strip()) for x in rotation_match.group(1).split(",")
-                ]
+                rotation = []
+                for coord in rotation_match.group(1).split(","):
+                    coord = coord.strip()
+                    try:
+                        # Try direct conversion first
+                        rotation.append(float(coord))
+                    except ValueError:
+                        # Try to evaluate as expression with instrument parameters
+                        try:
+                            # # Create evaluation context with parameters and math functions
+                            # import math
+
+                            # eval_context = {
+                            #     **self.parameters,
+                            #     "PI": math.pi,
+                            #     "sin": math.sin,
+                            #     "cos": math.cos,
+                            #     "tan": math.tan,
+                            #     "atan": math.atan,
+                            # }
+                            value = eval(coord, {"__builtins__": {}}, eval_context)
+                            rotation.append(float(value))
+                            print(
+                                f"DEBUG EVAL ROTATION: {name} - evaluated '{coord}' = {value}"
+                            )
+                        except Exception as e:
+                            print(
+                                f"WARNING: Could not evaluate rotation '{coord}' for {name}:  {e}, using 0.0"
+                            )
+                            rotation.append(0.0)
 
             component = McStasComponent(
                 name, comp_type, at_pos, rel_to, rotation, params
@@ -343,6 +413,8 @@ class McStasInstrumentParser:
                         f"DEBUG POS: {comp.name} no parent found for {comp.relative_to}, using {comp.absolute_pos}"
                     )
 
+            # print(f"DEBUG ROT: {comp.name} rotation = {comp.absolute_rotation}")
+
             return comp.absolute_pos, comp.absolute_rotation
 
         for comp in self.components:
@@ -421,12 +493,43 @@ class McStasVisualizer:
             mesh = p3.Mesh(geometry, material)
         # Chopper
         elif "chopper" in comp_type or "diskchopper" in comp_type:
+            # return None
             radius = params.get("radius", params.get("R", 0.3))
             thickness = params.get("thickness", 0.02)
-            geometry = p3.CylinderGeometry(radius, radius, thickness, 32)
+            # geometry = p3.CylinderGeometry(radius, radius, thickness, 32)
+            # mesh = p3.Mesh(geometry, material)
+
+            # # Convert theta_0 to radians
+            # theta_0 = params.get("theta_0", 0)
+            # print("Chopper theta_0:", theta_0)
+            # theta_rad = theta_0 * np.pi / 180
+
+            # # Calculate how much of the disk to show (everything except the opening)
+            # # The opening is centered around the beam path (at the calculated offset)
+            # thetaLength = 2 * np.pi - theta_rad if theta_rad > 0 else 2 * np.pi
+            # # Start angle offset so the opening is centered around the y-axis (beam path)
+            # thetaStart = theta_rad / 2 if theta_rad > 0 else 0
+
+            thetaStart = 0
+            thetaLength = 2 * np.pi
+
+            geometry = p3.CylinderGeometry(
+                radius, radius, thickness, 32, 1, False, thetaStart, thetaLength
+            )
             mesh = p3.Mesh(geometry, material)
+
             # Rotate to face beam direction (z-axis)
-            mesh.rotation = (np.pi / 2, 0, 0, "XYZ")
+            # mesh.rotation = (np.pi / 2, 0, 0, "XYZ")
+            mesh.rotateX(np.pi / 2)
+            print("Chopper geometry created", mesh.rotation)
+
+            # Offset the chopper so beam passes through the opening
+            # Beam passes at y = 0.5 * (radius + radius - yheight) = 0.5 * (2*radius - yheight)
+            yheight = params.get("yheight", -1)
+            if yheight > 0:
+                beam_offset = 0.5 * (2 * radius - yheight)
+                # Move the chopper down so the beam passes through the opening
+                mesh.position = (0, -beam_offset, 0)
 
         # Sample (sphere or box)
         elif "sample" in comp_type or "sans" in comp_type:
@@ -498,6 +601,10 @@ class McStasVisualizer:
             if geometry:
                 edges = p3.EdgesGeometry(geometry)
                 wireframe = p3.LineSegments(edges, wireframe_material, linewidth=2)
+                if "chopper" in comp_type or "diskchopper" in comp_type:
+                    # Rotate wireframe to match chopper orientation
+                    wireframe.rotateX(np.pi / 2)
+                    wireframe.position = mesh.position
                 group = p3.Group()
                 group.add(mesh)
                 group.add(wireframe)
@@ -535,11 +642,21 @@ class McStasVisualizer:
                 pos = component.absolute_pos
                 geom.position = tuple(pos)
 
-                # Set rotation (convert degrees to radians)
-                rot = component.absolute_rotation * np.pi / 180
-                geom.rotation = (rot[0], rot[1], rot[2], "XYZ")
+                # # Set rotation (convert degrees to radians)
+                # rot = component.absolute_rotation * np.pi / 180
+                # # geom.rotation = (rot[0], rot[1], rot[2], "XYZ")
+                # geom.rotateX(rot[0])
+                # geom.rotateY(rot[1])
+                # geom.rotateZ(rot[2])
+                # # print(
+                # #     "debuuuuuuuug",
+                # #     component.name,
+                # #     geom.rotation,
+                # #     component.absolute_rotation,
+                # # )
 
                 scene.add(geom)
+                # print(geom.rotation)
                 self.scene_objects.append(geom)
 
                 # # Add label (simplified - using small text would require TextGeometry)
